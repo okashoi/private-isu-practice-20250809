@@ -17,12 +17,12 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
-	"github.com/kaz/pprotein/integration/standalone"
 	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
+	"github.com/kaz/pprotein/integration/standalone"
 	_ "net/http/pprof"
 )
 
@@ -263,6 +263,11 @@ func getTemplPath(filename string) string {
 }
 
 func getInitialize(w http.ResponseWriter, r *http.Request) {
+	go func() {
+		if _, err := http.Get("http://172.31.33.238:9000/api/group/collect"); err != nil {
+			log.Printf("failed to communicate with pprotein: %v", err)
+		}
+	}()
 	dbInitialize()
 	w.WriteHeader(http.StatusOK)
 }
@@ -799,12 +804,7 @@ func main() {
 	// 	log.Println(http.ListenAndServe(":6060", nil))
 	// }()
 	go func() {
-		if _, err := http.Get("http://172.31.33.238:9000/api/group/collect"); err != nil {
-			log.Printf("failed to communicate with pprotein: %v", err)
-		}
-	}()
-	go func() {
-	     standalone.Integrate("172.31.33.238:19000")
+		standalone.Integrate(":6060")
 	}()
 
 	host := os.Getenv("ISUCONP_DB_HOST")
