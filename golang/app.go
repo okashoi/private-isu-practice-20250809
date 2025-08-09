@@ -48,9 +48,9 @@ type User struct {
 }
 
 type Post struct {
-	ID     int `db:"id"`
-	UserID int `db:"user_id"`
-	// Imgdata      []byte    `db:"imgdata"`
+	ID           int       `db:"id"`
+	UserID       int       `db:"user_id"`
+	Imgdata      []byte    `db:"imgdata"`
 	Body         string    `db:"body"`
 	Mime         string    `db:"mime"`
 	CreatedAt    time.Time `db:"created_at"`
