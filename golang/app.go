@@ -499,7 +499,14 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	err := db.Select(
+		&results,
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"ORDER BY `created_at` DESC\n"+
+			"LIMIT ?",
+		postsPerPage,
+	)
 	if err != nil {
 		log.Print(err)
 		return
@@ -545,7 +552,16 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.Select(
+		&results,
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"WHERE `user_id` = ?\n"+
+			"ORDER BY `created_at` DESC\n"+
+			"LIMIT ?",
+		user.ID,
+		postsPerPage,
+	)
 	if err != nil {
 		log.Print(err)
 		return
@@ -633,7 +649,16 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	err = db.Select(
+		&results,
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"WHERE `created_at` <= ?\n"+
+			"ORDER BY `created_at` DESC\n"+
+			"LIMIT ?",
+		t.Format(ISO8601Format),
+		postsPerPage,
+	)
 	if err != nil {
 		log.Print(err)
 		return
