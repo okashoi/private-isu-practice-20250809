@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ const (
 	postsPerPage  = 20
 	ISO8601Format = "2006-01-02T15:04:05-07:00"
 	UploadLimit   = 10 * 1024 * 1024 // 10mb
+	ImageDir      = "../public/images"
 )
 
 type User struct {
@@ -91,6 +93,50 @@ func dbInitialize() {
 	for _, sql := range sqls {
 		db.Exec(sql)
 	}
+
+	migrateImagesToFilesystem()
+}
+
+func migrateImagesToFilesystem() {
+	posts := []Post{}
+	err := db.Select(&posts, "SELECT `id`, `mime`, `imgdata` FROM `posts` WHERE LENGTH(`imgdata`) > 0")
+	if err != nil {
+		log.Printf("Failed to fetch posts with images: %v", err)
+		return
+	}
+
+	for _, post := range posts {
+		if len(post.Imgdata) == 0 {
+			continue
+		}
+
+		ext := ""
+		if post.Mime == "image/jpeg" {
+			ext = "jpg"
+		} else if post.Mime == "image/png" {
+			ext = "png"
+		} else if post.Mime == "image/gif" {
+			ext = "gif"
+		} else {
+			continue
+		}
+
+		filePath := filepath.Join(ImageDir, fmt.Sprintf("%d.%s", post.ID, ext))
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			err = os.WriteFile(filePath, post.Imgdata, 0644)
+			if err != nil {
+				log.Printf("Failed to migrate image %d: %v", post.ID, err)
+				continue
+			}
+		}
+
+		_, err = db.Exec("UPDATE `posts` SET `imgdata` = ? WHERE `id` = ?", []byte{}, post.ID)
+		if err != nil {
+			log.Printf("Failed to clear imgdata for post %d: %v", post.ID, err)
+		}
+	}
+
+	log.Printf("Migrated %d images to filesystem", len(posts))
 }
 
 func tryLogin(accountName, password string) *User {
@@ -791,7 +837,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		query,
 		me.ID,
 		mime,
-		filedata,
+		[]byte{},
 		r.FormValue("body"),
 	)
 	if err != nil {
@@ -802,6 +848,22 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	pid, err := result.LastInsertId()
 	if err != nil {
 		log.Print(err)
+		return
+	}
+
+	ext := ""
+	if mime == "image/jpeg" {
+		ext = "jpg"
+	} else if mime == "image/png" {
+		ext = "png"
+	} else if mime == "image/gif" {
+		ext = "gif"
+	}
+
+	filePath := filepath.Join(ImageDir, fmt.Sprintf("%d.%s", pid, ext))
+	err = os.WriteFile(filePath, filedata, 0644)
+	if err != nil {
+		log.Printf("Failed to save image file: %v", err)
 		return
 	}
 
@@ -816,28 +878,48 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	post := Post{}
-	err = db.Get(&post, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	ext := r.PathValue("ext")
+	var expectedMime string
+	switch ext {
+	case "jpg":
+		expectedMime = "image/jpeg"
+	case "png":
+		expectedMime = "image/png"
+	case "gif":
+		expectedMime = "image/gif"
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	filePath := filepath.Join(ImageDir, fmt.Sprintf("%d.%s", pid, ext))
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			post := Post{}
+			err = db.Get(&post, "SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = ?", pid)
+			if err != nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if post.Mime == expectedMime {
+				w.Header().Set("Content-Type", post.Mime)
+				_, err := w.Write(post.Imgdata)
+				if err != nil {
+					log.Print(err)
+				}
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", expectedMime)
+	_, err = w.Write(fileData)
 	if err != nil {
 		log.Print(err)
-		return
 	}
-
-	ext := r.PathValue("ext")
-
-	if ext == "jpg" && post.Mime == "image/jpeg" ||
-		ext == "png" && post.Mime == "image/png" ||
-		ext == "gif" && post.Mime == "image/gif" {
-		w.Header().Set("Content-Type", post.Mime)
-		_, err := w.Write(post.Imgdata)
-		if err != nil {
-			log.Print(err)
-			return
-		}
-		return
-	}
-
-	w.WriteHeader(http.StatusNotFound)
 }
 
 func postComment(w http.ResponseWriter, r *http.Request) {
