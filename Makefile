@@ -1,4 +1,4 @@
-APPNAME := isuhoge-go.service
+APPNAME := isu-go.service
 
 .PHONY: *
 gogo: stop-services build logs/clear start-services
@@ -10,14 +10,12 @@ stop-services:
 	# ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
-	__FIXME__
-	# cd go && make
-	# cd go && go build -o isuhoge
+	cd golang && make
 
 logs: limit=10000
 logs: opts=
 logs:
-	journalctl -ex --since "$(shell systemctl status isuride-go.service | grep "Active:" | awk '{print $$6, $$7}')" -n $(limit) -q $(opts)
+	journalctl -ex --since "$(shell systemctl status $(APPNAME) | grep "Active:" | awk '{print $$6, $$7}')" -n $(limit) -q $(opts)
 
 logs/error:
 	$(MAKE) logs opts='--grep "(error|panic|- 500)" --no-pager'
@@ -52,3 +50,5 @@ pprof:
 	curl -sSf "http://localhost:6060/debug/fgprof?seconds=$(time)" > $(prof_file)
 	go tool pprof $(prof_file)
 
+bench:
+	ssh isucon-bench "/home/isucon/private_isu/benchmarker/bin/benchmarker -u /home/isucon/private_isu/benchmarker/userdata -t http://35.74.246.174/"
