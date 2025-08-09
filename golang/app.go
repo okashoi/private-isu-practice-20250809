@@ -396,11 +396,9 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	err := db.Select(
 		&results,
-		"SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`\n"+
-			"FROM `posts` AS p\n"+
-			"JOIN `users` AS u ON u.`id` = p.`user_id`\n"+
-			"WHERE u.`del_flg` = 0\n"+
-			"ORDER BY p.`created_at` DESC\n"+
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"ORDER BY `created_at` DESC\n"+
 			"LIMIT ?",
 		postsPerPage,
 	)
@@ -548,11 +546,10 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	results := []Post{}
 	err = db.Select(
 		&results,
-		"SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`\n"+
-			"FROM `posts` AS p\n"+
-			"JOIN `users` AS u ON u.`id` = p.`user_id`\n"+
-			"WHERE p.`created_at` <= ? AND u.`del_flg` = 0\n"+
-			"ORDER BY p.`created_at` DESC\n"+
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"WHERE `created_at` <= ?\n"+
+			"ORDER BY `created_at` DESC\n"+
 			"LIMIT ?",
 		t.Format(ISO8601Format),
 		postsPerPage,
