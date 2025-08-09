@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/kaz/pprotein/integration/standalone"
 	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
-	"github.com/felixge/fgprof"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
@@ -794,9 +794,17 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
+	// http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
+	// go func() {
+	// 	log.Println(http.ListenAndServe(":6060", nil))
+	// }()
 	go func() {
-		log.Println(http.ListenAndServe(":6060", nil))
+		if _, err := http.Get("http://172.31.33.238:9000/api/group/collect"); err != nil {
+			log.Printf("failed to communicate with pprotein: %v", err)
+		}
+	}()
+	go func() {
+	     standalone.Integrate("172.31.33.238:19000")
 	}()
 
 	host := os.Getenv("ISUCONP_DB_HOST")
