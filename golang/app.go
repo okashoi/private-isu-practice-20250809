@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/bradfitz/gomemcache/memcache"
 	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
 	"github.com/go-chi/chi/v5"
@@ -23,7 +25,6 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/kaz/pprotein/integration/standalone"
-	_ "net/http/pprof"
 )
 
 var (
@@ -174,54 +175,159 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 }
 
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+	// 1) 投稿者ユーザーを一括取得して del_flg を判定 → 対象投稿を先に絞り込む
+	if len(results) == 0 {
+		return []Post{}, nil
+	}
 
+	authorIDSet := make(map[int]struct{}, len(results))
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		authorIDSet[p.UserID] = struct{}{}
+	}
+	authorIDs := make([]interface{}, 0, len(authorIDSet))
+	for id := range authorIDSet {
+		authorIDs = append(authorIDs, id)
+	}
+
+	var authors []User
+	if len(authorIDs) > 0 {
+		q, args, err := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", authorIDs)
 		if err != nil {
 			return nil, err
 		}
-
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
-		if err != nil {
+		q = db.Rebind(q)
+		if err := db.Select(&authors, q, args...); err != nil {
 			return nil, err
 		}
+	}
+	authorMap := make(map[int]User, len(authors))
+	for _, u := range authors {
+		authorMap[u.ID] = u
+	}
 
-		for i := range comments {
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
+	// del_flg=0 の投稿だけに絞ってページ分だけ選ぶ
+	selected := make([]Post, 0, postsPerPage)
+	for _, p := range results {
+		if u, ok := authorMap[p.UserID]; ok {
+			if u.DelFlg != 0 {
+				continue
+			}
+			p.User = u
+			p.CSRFToken = csrfToken
+			selected = append(selected, p)
+			if len(selected) >= postsPerPage {
+				break
 			}
 		}
+	}
+	if len(selected) == 0 {
+		return []Post{}, nil
+	}
 
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
-
-		p.Comments = comments
-
-		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
-		}
-
-		p.CSRFToken = csrfToken
-
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
-		if len(posts) >= postsPerPage {
-			break
+	// 2) 選ばれた投稿の ID を収集
+	postIDArgs := make([]interface{}, 0, len(selected))
+	postIDSet := make(map[int]struct{}, len(selected))
+	for _, p := range selected {
+		if _, ok := postIDSet[p.ID]; !ok {
+			postIDSet[p.ID] = struct{}{}
+			postIDArgs = append(postIDArgs, p.ID)
 		}
 	}
 
-	return posts, nil
+	// 3) コメント件数をまとめて取得
+	type countRow struct {
+		PostID int `db:"post_id"`
+		Count  int `db:"count"`
+	}
+	counts := []countRow{}
+	{
+		q, args, err := sqlx.In("SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`", postIDArgs)
+		if err != nil {
+			return nil, err
+		}
+		q = db.Rebind(q)
+		if err := db.Select(&counts, q, args...); err != nil {
+			return nil, err
+		}
+	}
+	countMap := make(map[int]int, len(counts))
+	for _, r := range counts {
+		countMap[r.PostID] = r.Count
+	}
+
+	// 4) コメント本体をまとめて取得（allComments なら全件、そうでなければ各投稿最新3件）
+	comments := []Comment{}
+	if allComments {
+		q, args, err := sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` ASC", postIDArgs)
+		if err != nil {
+			return nil, err
+		}
+		q = db.Rebind(q)
+		if err := db.Select(&comments, q, args...); err != nil {
+			return nil, err
+		}
+	} else {
+		// MySQL 8 のウィンドウ関数で投稿毎の最新3件を一括取得
+		// 取得後は created_at 昇順になるよう ORDER BY も付与
+		q, args, err := sqlx.In(`
+            SELECT id, post_id, user_id, comment, created_at
+            FROM (
+                SELECT c.*, ROW_NUMBER() OVER (PARTITION BY post_id ORDER BY created_at DESC) AS rn
+                FROM comments c
+                WHERE post_id IN (?)
+            ) t
+            WHERE t.rn <= 3
+            ORDER BY post_id, created_at ASC
+        `, postIDArgs)
+		if err != nil {
+			return nil, err
+		}
+		q = db.Rebind(q)
+		if err := db.Select(&comments, q, args...); err != nil {
+			return nil, err
+		}
+	}
+
+	// 5) コメントユーザーをまとめて取得
+	commentUserIDSet := make(map[int]struct{})
+	for _, c := range comments {
+		commentUserIDSet[c.UserID] = struct{}{}
+	}
+	commentUserIDs := make([]interface{}, 0, len(commentUserIDSet))
+	for id := range commentUserIDSet {
+		commentUserIDs = append(commentUserIDs, id)
+	}
+	commentUsers := []User{}
+	if len(commentUserIDs) > 0 {
+		q, args, err := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", commentUserIDs)
+		if err != nil {
+			return nil, err
+		}
+		q = db.Rebind(q)
+		if err := db.Select(&commentUsers, q, args...); err != nil {
+			return nil, err
+		}
+	}
+	commentUserMap := make(map[int]User, len(commentUsers))
+	for _, u := range commentUsers {
+		commentUserMap[u.ID] = u
+	}
+	// コメントを post_id ごとにまとめ、ユーザーを紐付け
+	commentsByPost := make(map[int][]Comment)
+	for i := range comments {
+		if u, ok := commentUserMap[comments[i].UserID]; ok {
+			comments[i].User = u
+		}
+		commentsByPost[comments[i].PostID] = append(commentsByPost[comments[i].PostID], comments[i])
+	}
+
+	// 6) 結果に反映
+	for i := range selected {
+		selected[i].CommentCount = countMap[selected[i].ID]
+		selected[i].Comments = commentsByPost[selected[i].ID]
+	}
+
+	return selected, nil
 }
 
 func imageURL(p Post) string {
@@ -393,7 +499,14 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	err := db.Select(
+		&results,
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"ORDER BY `created_at` DESC\n"+
+			"LIMIT ?",
+		postsPerPage,
+	)
 	if err != nil {
 		log.Print(err)
 		return
@@ -439,7 +552,16 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.Select(
+		&results,
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"WHERE `user_id` = ?\n"+
+			"ORDER BY `created_at` DESC\n"+
+			"LIMIT ?",
+		user.ID,
+		postsPerPage,
+	)
 	if err != nil {
 		log.Print(err)
 		return
@@ -527,7 +649,16 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	err = db.Select(
+		&results,
+		"SELECT `id`, `user_id`, `body`, `mime`, `created_at`\n"+
+			"FROM `posts`\n"+
+			"WHERE `created_at` <= ?\n"+
+			"ORDER BY `created_at` DESC\n"+
+			"LIMIT ?",
+		t.Format(ISO8601Format),
+		postsPerPage,
+	)
 	if err != nil {
 		log.Print(err)
 		return
